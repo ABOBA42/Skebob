@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Пепел Рассвета — экшен-RPG</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔥</text></svg>">
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+
+<!-- ================= HUD ================= -->
+<div id="hud">
+  <div id="barsBox">
+    <div class="bar hp" id="barHp"><div class="fill" id="hpFill"></div><span class="bar-text" id="hpText"></span></div>
+    <div class="bar stam" id="barStam"><div class="fill" id="stamFill"></div></div>
+    <div class="bar mp" id="barMp"><div class="fill" id="mpFill"></div></div>
+  </div>
+
+  <div id="topRight">
+    <div id="clockBox"><span id="clockIcon">☀️</span> <span id="clockTime">08:00</span></div>
+    <div id="soulsBox">💠 <span id="soulsCount">0</span></div>
+    <div id="locName">Тихий Дол</div>
+    <div id="questTracker"></div>
+  </div>
+
+  <div id="quickbar">
+    <div id="weaponSlot" title="Оружие (X или колесо мыши — смена)">
+      <span id="weaponIcon">🗡️</span>
+      <div class="ws-text"><span id="weaponName">Сломанный меч</span><small>X — смена</small></div>
+      <span id="resinBadge" style="display:none">🍯</span>
+    </div>
+    <div id="spellBar"></div>
+    <div id="estusBox" title="Эстус (R)">
+      <span class="estus-icon">🏺</span>
+      <span id="estusCount">×3</span>
+      <small>R</small>
+    </div>
+  </div>
+
+  <div id="bossBar"><div id="bossName"></div><div class="boss-track"><div id="bossFill"></div></div></div>
+  <div id="prompt"></div>
+  <div id="banner"></div>
+  <div id="toasts"></div>
+  <div id="vignette"></div>
+  <button id="muteBtn" title="Звук (M)">🔊</button>
+</div>
+
+<!-- ================= Диалог ================= -->
+<div id="dialog" class="overlay hidden">
+  <div class="panel dlg-panel">
+    <button class="x-close dlg-close">✕</button>
+    <div id="dlgName"></div>
+    <div id="dlgRole"></div>
+    <div id="dlgText"></div>
+    <div id="dlgOpts"></div>
+  </div>
+</div>
+
+<!-- ================= Магазин ================= -->
+<div id="shop" class="overlay hidden">
+  <div class="panel shop-panel">
+    <button class="x-close dlg-close" id="shopClose">✕</button>
+    <div class="panel-head"><span id="shopName"></span><span id="shopSouls"></span></div>
+    <div class="shop-cols">
+      <div class="shop-col"><h3>Купить</h3><div id="buyList" class="shop-list"></div></div>
+      <div class="shop-col"><h3>Продать (40% цены)</h3><div id="sellList" class="shop-list"></div></div>
+      <div class="shop-col detail-col"><div id="shopDetail"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= Меню ================= -->
+<div id="menu" class="overlay hidden">
+  <div class="panel menu-panel">
+    <button class="x-close" id="menuClose">✕</button>
+    <div class="menu-tabs">
+      <button class="menu-tab active" data-tab="inv">🎒 Инвентарь</button>
+      <button class="menu-tab" data-tab="char">👤 Персонаж</button>
+      <button class="menu-tab" data-tab="quests">📜 Квесты</button>
+      <button class="menu-tab" data-tab="map">🗺️ Карта</button>
+      <button class="menu-tab" data-tab="controls">⌨️ Управление</button>
+    </div>
+    <div id="menuBody"></div>
+  </div>
+</div>
+
+<!-- ================= Костёр ================= -->
+<div id="bonfire" class="overlay hidden">
+  <div class="panel bf-panel">
+    <div id="bfName"></div>
+    <div class="bf-sub">Пламя греет. Тьма ждёт.</div>
+    <div id="bfOpts"></div>
+  </div>
+</div>
+
+<!-- ================= Прокачка ================= -->
+<div id="levelup" class="overlay hidden">
+  <div class="panel lu-panel">
+    <div class="panel-head"><span>⬆️ Обратить души в силу</span><span id="luSouls"></span></div>
+    <div id="luCost" class="lu-cost"></div>
+    <div id="luStats"></div>
+    <button class="dlg-btn" id="luBack">← Вернуться к костру</button>
+  </div>
+</div>
+
+<!-- ================= Смерть ================= -->
+<div id="deathScreen" class="hidden">
+  <div class="death-text">ВЫ ПОГИБЛИ</div>
+  <div class="death-sub">Души остались на месте гибели…</div>
+</div>
+
+<!-- ================= Финал ================= -->
+<div id="endScreen" class="overlay hidden">
+  <div class="panel end-panel">
+    <h1>🌅 РАССВЕТ</h1>
+    <div id="endText"></div>
+    <div id="endStats"></div>
+    <button class="gold-btn" id="btnEndContinue">Продолжить странствие</button>
+  </div>
+</div>
+
+<!-- ================= Титульный экран ================= -->
+<div id="titleScreen">
+  <div id="titleEmbers"></div>
+  <div class="title-inner">
+    <div class="title-over">экшен-RPG в духе The Elder Scrolls и Dark Souls</div>
+    <h1 class="title-main">ПЕПЕЛ РАССВЕТА</h1>
+    <div class="title-rule"></div>
+    <div id="introBox"></div>
+    <div class="title-btns">
+      <button class="gold-btn big" id="btnNew">🔥 Начать путешествие</button>
+      <button class="gold-btn big" id="btnContinue">🕯️ Продолжить</button>
+    </div>
+    <div class="title-hint">WASD — движение · ЛКМ/ПКМ — удары · Пробел — перекат · R — эстус · E — говорить · Tab — меню</div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/maps.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
