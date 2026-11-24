@@ -92,6 +92,10 @@ const AudioSys = {
   quest(){ this.tone(660, .15, 'triangle', .14); setTimeout(() => this.tone(990, .25, 'triangle', .14), 140); },
   pickup(){ this.tone(800, .1, 'sine', .1, 1000); },
   gate(){ this.tone(150, .4, 'triangle', .2, 90); this.noise(.3, 400, .12); },
+  skill(){ this.tone(420, .25, 'triangle', .18, 880); this.noise(.2, 1400, .1, 3); },
+  crit(){ this.tone(980, .18, 'square', .16, 240); this.noise(.16, 2600, .14, 2); },
+  slam(){ this.tone(60, .5, 'sine', .35, 30); this.noise(.4, 220, .3, .7); },
+  evade(){ this.noise(.16, 1500, .09, 2.5); },
 };
 
 /* ================= Состояние игры ================= */
@@ -151,6 +155,7 @@ function spellPower(){
   const w = ITEMS[G.equip.weapon];
   if(w && w.spellPower) p += w.spellPower;
   p += ringVal('spellPower');
+  if(P.skillBuffs.staff > 0) p += .5;   // навык посоха: Вспышка маны
   return p;
 }
 function weaponDmg(){
@@ -185,11 +190,16 @@ const P = {
   drinkKind:null, drinkHealed:false, castSpell:null, castDone:false,
   rollDir:0, rollDist:0, rollDur:0, rollIf:[0, 0],
   cds:{}, hurtFlash:0, atkBuf:null, vx:0, vy:0,
-  walkCycle:0, swingAnim:0,
+  walkCycle:0, swingAnim:0, animStyle:'sword', comboStep:0,
+  // навык оружия (G)
+  skillCd:0, skillBuffs:{ sword:0, dagger:0, staff:0 }, critReady:false,
+  thrustsLeft:0, thrustT:0, hidden:false, sprintFx:0,
 };
 function resetRuntime(){
   P.act = 'idle'; P.t = 0; P.lock = null; P.blocking = false;
   P.iframes = 0; P.cds = {}; P.hurtFlash = 0; P.atkBuf = null;
+  P.skillCd = 0; P.skillBuffs = { sword:0, dagger:0, staff:0 };
+  P.critReady = false; P.thrustsLeft = 0; P.hidden = false;
 }
 
 /* ================= Мир ================= */
@@ -203,6 +213,11 @@ function makeEnemy(type, x, y){
     aggroed:false, slow:0, hitFlash:0, poiseAcc:0,
     cd:rnd(0, .8), deadT:0, phase2:false, summoned:false,
     dashVX:0, dashVY:0, atkKind:null, hitPlayer:false,
+    // --- тактический ИИ ---
+    strafeDir:Math.random() < .5 ? 1 : -1, strafeT:rnd(1, 2.6),
+    evadeCd:rnd(.4, 1.4), flankT:rnd(1.5, 3.5), flankSide:Math.random() < .5 ? 1 : -1,
+    backoffCd:rnd(1, 2.5), reactCd:0, wantWindup:false, lunge:false,
+    rollT:0, rollDur:.5, rollDirA:0, anim:'idle', animT:0, walkPhase:rnd(0, TAU),
   };
 }
 function loadMap(id, spawn){
@@ -432,13 +447,101 @@ function tryAttack(heavy){
   }
   if(P.act !== 'idle') return;
   const w = ITEMS[G.equip.weapon];
-  const mv = WTYPE[w.wtype][heavy ? 'heavy' : 'light'];
+  const wt = w.wtype;
+  let mv = WTYPE[wt][heavy ? 'heavy' : 'light'];
+  // «Танец клинка»: атаки быстрее и почти без выносливости
+  if(P.skillBuffs.sword > 0 && !heavy) mv = { ...mv, wind:mv.wind * .65, rec:mv.rec * .6, stam:Math.ceil(mv.stam * .3) };
   if(G.stam < mv.stam){ flashStam(); return; }
   G.stam -= mv.stam; P.stamDelay = .6;
+  // комбо-счётчик для уникальных анимаций (сбрасывается при простое)
+  P.comboStep = (P.lastAtk !== undefined && performance.now() / 1000 - P.lastAtk < mv.wind + mv.act + mv.rec + .55) ? (P.comboStep % 3) + 1 : 1;
+  P.lastAtk = performance.now() / 1000;
   P.act = 'attack'; P.t = 0; P.move = mv; P.heavy = heavy;
+  P.animStyle = wt;
   P.phase = 'wind'; P.hitSet = new Set(); P.atkBuf = null;
   P.blocking = false;
   if(P.lock) P.facing = angTo(G.px, G.py, P.lock.x, P.lock.y);
+  AudioSys.swing();
+}
+
+/* ---------- Уникальный навык оружия (клавиша G) ---------- */
+function currentSkill(){
+  const w = ITEMS[G.equip.weapon];
+  return w ? WSKILL[w.wtype] : null;
+}
+function trySkill(){
+  if(G.state !== 'play') return;
+  if(P.act !== 'idle') return;
+  const w = ITEMS[G.equip.weapon];
+  const sk = WSKILL[w.wtype];
+  if(!sk) return;
+  if(P.skillCd > 0){ toast('⏳ Навык перезаряжается: ' + Math.ceil(P.skillCd) + ' с', 'warn'); return; }
+  if(G.stam < sk.stam){ flashStam(); return; }
+  G.stam -= sk.stam; P.stamDelay = .7;
+  P.skillCd = sk.cd;
+  AudioSys.skill();
+  floatText(G.px, G.py - 42, sk.icon + ' ' + sk.name, '#ffd76a', true);
+  switch(w.wtype){
+    case 'sword': // Танец клинка — ускоренная серия ударов
+      P.skillBuffs.sword = sk.dur;
+      burst(G.px, G.py, '#cfe8ff', 16, 90, .5, 2.5);
+      break;
+    case 'dagger': // Тень убийцы — невидимость + следующий удар критический
+      P.skillBuffs.dagger = sk.dur;
+      P.critReady = true;
+      burst(G.px, G.py, '#3a3a55', 22, 110, .7, 3);
+      break;
+    case 'axe': // Круг мясника — круговой удар вокруг себя
+      axeCleave();
+      break;
+    case 'spear': // Шквал копий — 4 быстрых выпада
+      P.thrustsLeft = 4; P.thrustT = 0;
+      P.act = 'thrust'; P.t = 0; P.hitSet = new Set();
+      if(P.lock) P.facing = angTo(G.px, G.py, P.lock.x, P.lock.y);
+      break;
+    case 'greatsword': // Землетряс — удар в землю по площади
+      P.act = 'slam'; P.t = 0; P.hitSet = new Set();
+      if(P.lock) P.facing = angTo(G.px, G.py, P.lock.x, P.lock.y);
+      break;
+    case 'bow': // Дождь стрел — веер из 5 стрел
+      arrowRain();
+      break;
+    case 'staff': // Вспышка маны — восстановление маны + усиление чар
+      G.mp = Math.min(maxMp(), G.mp + maxMp() * .5);
+      P.skillBuffs.staff = 8;
+      burst(G.px, G.py, '#9b7fd0', 24, 130, .7, 3);
+      floatText(G.px, G.py - 26, '+' + Math.floor(maxMp() * .5) + ' маны', '#b9a0ff');
+      AudioSys.soul();
+      break;
+  }
+}
+function axeCleave(){
+  const w = ITEMS[G.equip.weapon];
+  const R = 120;
+  shake = Math.max(shake, 8);
+  AudioSys.slam();
+  burst(G.px, G.py, '#c0392b', 30, 240, .5, 3.5);
+  for(const e of W.enemies){
+    if(e.state === 'dead') continue;
+    if(dist(G.px, G.py, e.x, e.y) < R + e.d.size){
+      let dmg = weaponDmg() * 2.2;
+      if(w.bonusFire) dmg += w.bonusFire;
+      damageEnemy(e, dmg, { knock:55, poiseBreak:true });
+    }
+  }
+}
+function arrowRain(){
+  const w = ITEMS[G.equip.weapon];
+  const a0 = P.facing;
+  for(let i = -2; i <= 2; i++){
+    const a = a0 + i * .16;
+    W.projectiles.push({
+      x:G.px + Math.cos(a) * 20, y:G.py + Math.sin(a) * 20,
+      vx:Math.cos(a) * 540, vy:Math.sin(a) * 540,
+      r:4, dmg:weaponDmg() * .62, owner:'player', ttl:1.5,
+      color:'#e8d8a0', arrow:true, bonusFire:w.bonusFire || 0,
+    });
+  }
   AudioSys.swing();
 }
 function tryRoll(){
@@ -568,6 +671,7 @@ function damageEnemy(e, dmg, opts){
     moveCircle(e, Math.cos(a) * opts.knock, Math.sin(a) * opts.knock, e.d.size);
   }
   e.poiseAcc += dmg;
+  if(opts.poiseBreak) e.poiseAcc += e.d.poise; // гарантированный слом стойки
   if(e.poiseAcc > e.d.poise && !e.d.boss){
     e.state = 'stagger'; e.t = 0; e.poiseAcc = 0;
   }
@@ -969,21 +1073,77 @@ function updatePlayer(dt){
   checkExits();
 }
 
-/* ================= ИИ врагов ================= */
+/* ================= ИИ врагов (тактический) =================
+   Враги читают замах игрока: уходят перекатом из-под удара,
+   отступают, расходятся по флангам и стрейфят, вместо того чтобы
+   идти прямо в клинок. Поведение зависит от типа врага. */
+
+// игрок сейчас замахивается melee-атакой?
+function playerThreatening(){
+  if(P.act !== 'attack' || P.move.proj) return false;
+  return P.phase === 'wind' || (P.phase === 'act' && P.t < .08);
+}
+function playerAttacking(){
+  return (P.act === 'attack' && !P.move.proj) || P.act === 'slam' || P.act === 'thrust';
+}
+// шанс "прочитать" удар зависит от ловкости врага (мини-боссы читают лучше)
+function readChance(e){
+  let c = clamp((e.d.speed - 110) / 260, .12, .55);
+  if(e.d.mini) c += .15;
+  if(e.d.boss) c -= .3;          // боссы не убегают — они стоят своего
+  if(e.hp < e.hpMax * .35) c += .12; // раненые осторожнее
+  return c;
+}
+function enemyRoll(e, dirA){
+  e.state = 'evade'; e.t = 0;
+  e.rollDur = .5;
+  e.rollDirA = dirA;
+  e.iframes = true;
+  AudioSys.evade();
+  burst(e.x, e.y + 6, '#9aa4b8', 6, 60, .35, 2);
+}
+// реакция на замах: перекат в сторону / назад / выпад назад
+function enemyReact(e, dd, aToP){
+  const r = Math.random();
+  if(r < .45){
+    // перекат вбок от линии удара (в сторону, куда смотрит враг)
+    const side = Math.random() < .5 ? 1 : -1;
+    enemyRoll(e, aToP + side * Math.PI / 2 + rnd(-.35, .35));
+  } else if(r < .75){
+    enemyRoll(e, aToP + Math.PI + rnd(-.6, .6)); // назад
+  } else {
+    // быстрый отход без переката
+    e.state = 'retreat'; e.t = 0; e.retreatDur = rnd(.5, .8);
+  }
+  e.evadeCd = rnd(1.8, 3.2);
+  e.strafeT = .3; // сменить тактику после ухода
+}
+// движение с обходом препятствий: если впереди стена — скользим вдоль неё
+function smartMove(e, dx, dy, r){
+  const bx = e.x, by = e.y;
+  moveCircle(e, dx, dy, r);
+  if(Math.abs(e.x - bx) < Math.abs(dx) * .25 && Math.abs(dy) > 1){
+    moveCircle(e, 0, dy * 1.2, r); // упёрся по X — compensate по Y
+  } else if(Math.abs(e.y - by) < Math.abs(dy) * .25 && Math.abs(dx) > 1){
+    moveCircle(e, dx * 1.2, 0, r);
+  }
+}
 function enemySpeed(e){
   let s = e.d.speed;
   if(e.slow > 0) s *= .45;
   if(e.d.boss && e.phase2) s *= 1.3;
+  if(e.state === 'retreat') s *= 1.15;
   return s;
 }
 function startEnemyAttack(e, kind){
   e.state = 'windup'; e.t = 0; e.atkKind = kind; e.hitPlayer = false;
+  e.lunge = false;
   e.facing = angTo(e.x, e.y, G.px, G.py);
 }
 function enemyStrike(e){
   const d = e.d;
   if(e.atkKind === 'sweep' || e.atkKind === 'melee'){
-    const range = d.range + (e.d.boss ? 20 : 0);
+    const range = d.range + (e.d.boss ? 20 : 0) + (e.lunge ? 36 : 0);
     const arc = e.d.boss ? 2.6 : 1.9;
     const dd = dist(e.x, e.y, G.px, G.py);
     if(dd < range + 14 && Math.abs(angDiff(e.facing, angTo(e.x, e.y, G.px, G.py))) < arc / 2 + .25){
@@ -1075,13 +1235,57 @@ function updateEnemy(e, dt){
   }
   else if(e.state === 'chase'){
     if(!e.aggroed){ e.state = 'idle'; return; }
-    e.facing = lerpAngle(e.facing, angTo(e.x, e.y, G.px, G.py), dt * 8);
     const spd = enemySpeed(e);
+    const aToP = angTo(e.x, e.y, G.px, G.py);
+
+    /* ---- РЕАКЦИЯ НА ЗАМАХ ИГРОКА: перекат / отход ---- */
+    e.evadeCd = Math.max(0, (e.evadeCd || 0) - dt);
+    if(!d.boss && e.evadeCd <= 0 && playerThreatening() &&
+       dd < P.move.range + d.size + 46 && !e.slow){
+      // враг "видит" замах и уходит из-под удара
+      if(Math.random() < readChance(e)) enemyReact(e, dd, aToP);
+      else e.evadeCd = .7; // не успел прочитать — попробует в следующий раз
+    }
+
+    /* ---- ближний бой: фланги, стрейфы, ложные сближения ---- */
     if(d.behavior === 'melee' || d.behavior === 'boss1' || d.behavior === 'boss2'){
-      if(dd > d.range * .8){
-        const a = angTo(e.x, e.y, G.px, G.py);
-        moveCircle(e, Math.cos(a) * spd * dt, Math.sin(a) * spd * dt, d.size);
+      const engage = d.range * (d.behavior === 'melee' ? .78 : .9);
+      // сторона обхода периодически меняется; при атаке игрока — активнее уводим бок
+      e.flankT -= dt;
+      if(e.flankT <= 0){
+        e.flankT = rnd(1.4, 3.2) * (playerAttacking() ? .5 : 1);
+        if(Math.random() < .6) e.flankSide = -e.flankSide;
       }
+      // волки и упыры любят нырять в атаку рывком
+      const brawler = e.type === 'wolf' || e.type === 'ghoul' || d.mini;
+
+      if(dd > engage + 40){
+        // сближение по дуге, а не直线 в клинок
+        const arcOff = clamp((dd - engage) / 220, 0, 1) * .9 * e.flankSide;
+        const a = aToP + arcOff;
+        smartMove(e, Math.cos(a) * spd * dt, Math.sin(a) * spd * dt, d.size);
+        e.facing = lerpAngle(e.facing, aToP, dt * 8);
+      } else {
+        // дистанция боя: держим круг вокруг игрока
+        e.strafeT -= dt;
+        if(e.strafeT <= 0){ e.strafeT = rnd(.8, 2.0); if(Math.random() < .5) e.strafeDir = -e.strafeDir; }
+        let mvx = 0, mvy = 0;
+        if(playerAttacking() && !d.boss){
+          // под атакой отходим по касательной назад
+          const ta = aToP + Math.PI * .72 * e.strafeDir;
+          mvx = Math.cos(ta) * spd * .9; mvy = Math.sin(ta) * spd * .9;
+        } else if(dd < engage * .62){
+          // слишком плотно — чуть отпускаем
+          mvx = -Math.cos(aToP) * spd * .5; mvy = -Math.sin(aToP) * spd * .5;
+        } else {
+          // чистый стрейф вокруг игрока
+          const ta = aToP + Math.PI / 2 * e.strafeDir;
+          mvx = Math.cos(ta) * spd * .55; mvy = Math.sin(ta) * spd * .55;
+        }
+        smartMove(e, mvx * dt, mvy * dt, d.size);
+        e.facing = lerpAngle(e.facing, aToP, dt * 10);
+      }
+
       if(e.cd <= 0){
         if(d.behavior === 'boss1'){
           if(dd < d.range + 20) startEnemyAttack(e, 'sweep');
@@ -1092,27 +1296,57 @@ function updateEnemy(e, dt){
           else if(dd < 340 && roll < .55) startEnemyAttack(e, 'dash');
           else startEnemyAttack(e, 'burst');
         } else if(dd < d.range + 8){
-          startEnemyAttack(e, 'melee');
+          // добиваем убегающего длинным выпадом
+          e.lunge = brawler && dd > d.range * .55 && Math.random() < .5;
+          startEnemyAttack(e, Math.random() < .35 ? 'sweep' : 'melee');
         }
       }
-    } else { // ranged / caster
+    } else { // ranged / caster — держат дистанцию и kite-ят
       const want = d.range * .7;
-      const a = angTo(e.x, e.y, G.px, G.py);
-      if(dd < want * .55) moveCircle(e, -Math.cos(a) * spd * dt, -Math.sin(a) * spd * dt, d.size);
-      else if(dd > d.range * .95) moveCircle(e, Math.cos(a) * spd * dt, Math.sin(a) * spd * dt, d.size);
+      const a = aToP;
+      e.strafeT -= dt;
+      if(e.strafeT <= 0){ e.strafeT = rnd(1, 2.4); if(Math.random() < .5) e.strafeDir = -e.strafeDir; }
+      if(dd < want * .55) smartMove(e, -Math.cos(a) * spd * dt, -Math.sin(a) * spd * dt, d.size);
+      else if(dd > d.range * .95) smartMove(e, Math.cos(a) * spd * dt, Math.sin(a) * spd * dt, d.size);
       else {
-        // strafing
-        const sa = a + Math.PI / 2 * (e.uid % 2 ? 1 : -1);
-        moveCircle(e, Math.cos(sa) * spd * .4 * dt, Math.sin(sa) * spd * .4 * dt, d.size);
+        const sa = a + Math.PI / 2 * e.strafeDir + (playerAttacking() ? Math.PI * .25 * e.strafeDir : 0);
+        smartMove(e, Math.cos(sa) * spd * (playerAttacking() ? .8 : .45) * dt, Math.sin(sa) * spd * .45 * dt, d.size);
       }
       if(e.cd <= 0 && dd < d.range + 40) startEnemyAttack(e, 'shoot');
     }
     if(dd > aggroR * 2.2 && !d.boss){ e.aggroed = false; e.state = 'idle'; }
   }
+  /* ---- перекат-уклонение ---- */
+  else if(e.state === 'evade'){
+    e.t += dt;
+    const k = e.t / e.rollDur;
+    const spd = d.speed * (1.5 - k * .7);
+    // направление слегка доворачиваем к текущему положению игрока (чтоб не в стену)
+    if(k < .4) e.rollDirA = lerpAngle(e.rollDirA, angTo(e.x, e.y, G.px, G.py) + Math.PI / 2 * e.strafeDir, dt * 1.5);
+    moveCircle(e, Math.cos(e.rollDirA) * spd * dt, Math.sin(e.rollDirA) * spd * dt, d.size);
+    if(e.t >= e.rollDur){
+      e.state = 'chase'; e.iframes = false;
+      e.facing = angTo(e.x, e.y, G.px, G.py);
+    }
+  }
+  /* ---- отход без переката ---- */
+  else if(e.state === 'retreat'){
+    e.t += dt;
+    const a = angTo(e.x, e.y, G.px, G.py) + Math.PI;
+    const spd = enemySpeed(e);
+    smartMove(e, Math.cos(a) * spd * dt, Math.sin(a) * spd * dt, d.size);
+    e.facing = lerpAngle(e.facing, angTo(e.x, e.y, G.px, G.py), dt * 6);
+    if(e.t >= e.retreatDur) e.state = 'chase';
+  }
   else if(e.state === 'windup'){
     e.t += dt;
     const wind = d.windup * (e.phase2 ? .75 : 1) * (e.atkKind === 'dash' ? .7 : 1);
     if(e.atkKind !== 'dash') e.facing = lerpAngle(e.facing, angTo(e.x, e.y, G.px, G.py), dt * 4);
+    if(e.lunge && e.t > wind * .45){
+      // короткий шаг-выпад в момент замаха
+      const a = e.facing;
+      moveCircle(e, Math.cos(a) * d.speed * 1.3 * dt, Math.sin(a) * d.speed * 1.3 * dt, d.size);
+    }
     if(e.t >= wind){
       e.state = 'strike'; e.t = 0;
       enemyStrike(e);
